@@ -276,7 +276,7 @@ export class Client {
         headers: {
           Accept: 'application/json; charset=utf-8',
         },
-        success: (data: any, textStatus: string, xhr: JQueryXHR) => {
+        success: (responseData: any, textStatus: string, xhr: JQueryXHR) => {
           metric.measure({
             name: 'app.api.request-success',
             start: `api-request-start-${id}`,
@@ -285,7 +285,7 @@ export class Client {
             },
           });
           if (!isUndefined(options.success)) {
-            this.wrapCallback(id, options.success)(data, textStatus, xhr);
+            this.wrapCallback(id, options.success)(responseData, textStatus, xhr);
           }
         },
         error: (resp: JQueryXHR, textStatus: string, errorThrown: string) => {
