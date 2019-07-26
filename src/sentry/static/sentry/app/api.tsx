@@ -1,4 +1,4 @@
-import {isUndefined, isNil, get} from 'lodash';
+import {isUndefined, isNil, get, isFunction} from 'lodash';
 import $ from 'jquery';
 import * as Sentry from '@sentry/browser';
 
@@ -14,7 +14,10 @@ import GroupActions from 'app/actions/groupActions';
 import createRequestError from 'app/utils/requestError/createRequestError';
 
 export class Request {
-  constructor(xhr) {
+  alive: boolean;
+  xhr: JQueryXHR;
+
+  constructor(xhr: JQueryXHR) {
     this.xhr = xhr;
     this.alive = true;
   }
@@ -26,12 +29,35 @@ export class Request {
   }
 }
 
+type ParamsType = {
+  itemIds?: Array<number>;
+  query?: string;
+  environment?: string | null;
+  project?: Array<number> | null;
+};
+
+type QueryArgs =
+  | {
+      query: string;
+      environment?: string;
+      project?: Array<number>;
+    }
+  | {
+      id: Array<number>;
+      environment?: string;
+      project?: Array<number>;
+    }
+  | {
+      environment?: string;
+      project?: Array<number>;
+    };
+
 /**
  * Converts input parameters to API-compatible query arguments
  * @param params
  */
-export function paramsToQueryArgs(params) {
-  const p = params.itemIds
+export function paramsToQueryArgs(params: ParamsType): QueryArgs {
+  const p: QueryArgs = params.itemIds
     ? {id: params.itemIds} // items matching array of itemids
     : params.query
     ? {query: params.query} // items matching search query
@@ -58,7 +84,28 @@ export function paramsToQueryArgs(params) {
   return p;
 }
 
+// TODO: move this somewhere
+type APIRequestMethod = 'POST' | 'GET' | 'DELETE' | 'PUT';
+
+type FunctionCallback = (...args: any[]) => void;
+
+type RequestCallbacks = {
+  success?: FunctionCallback;
+  complete?: FunctionCallback;
+  error?: FunctionCallback;
+};
+
+type RequestOptions = {
+  method?: APIRequestMethod;
+  data?: any;
+  query?: Array<any> | object;
+  preservedError?: Error;
+} & RequestCallbacks;
+
 export class Client {
+  baseUrl: string;
+  activeRequests: {[ids: string]: Request};
+
   constructor(options) {
     if (isUndefined(options)) {
       options = {};
@@ -71,7 +118,7 @@ export class Client {
    * Check if the API response says project has been renamed.
    * If so, redirect user to new project slug
    */
-  hasProjectBeenRenamed(response) {
+  hasProjectBeenRenamed(response: JQueryXHR) {
     const code = get(response, 'responseJSON.detail.code');
 
     // XXX(billy): This actually will never happen because we can't intercept the 302
@@ -86,7 +133,7 @@ export class Client {
     return true;
   }
 
-  wrapCallback(id, func, cleanup) {
+  wrapCallback(id: string, func: FunctionCallback | undefined, cleanup: boolean = false) {
     return (...args) => {
       const req = this.activeRequests[id];
       if (cleanup === true) {
@@ -96,6 +143,7 @@ export class Client {
       if (req && req.alive) {
         // Check if API response is a 302 -- means project slug was renamed and user
         // needs to be redirected
+        // @ts-ignore
         if (this.hasProjectBeenRenamed(...args)) {
           return;
         }
@@ -113,7 +161,7 @@ export class Client {
   /**
    * Attempt to cancel all active XHR requests
    */
-  clear() {
+  clear(): void {
     for (const id in this.activeRequests) {
       this.activeRequests[id].cancel();
     }
@@ -162,7 +210,7 @@ export class Client {
     errorCb(response, ...responseArgs);
   }
 
-  request(path, options = {}) {
+  request(path: string, options: Readonly<RequestOptions> = {}) {
     const method = options.method || (options.data ? 'POST' : 'GET');
     let data = options.data;
 
@@ -191,10 +239,10 @@ export class Client {
       throw err;
     }
 
-    const id = uniqueId();
+    const id: string = uniqueId();
     metric.mark(`api-request-start-${id}`);
 
-    let fullUrl;
+    let fullUrl: string;
     if (path.indexOf(this.baseUrl) === -1) {
       fullUrl = this.baseUrl + path;
     } else {
@@ -219,8 +267,7 @@ export class Client {
         headers: {
           Accept: 'application/json; charset=utf-8',
         },
-        success: (...args) => {
-          const [, , xhr] = args || [];
+        success: (data: any, textStatus: string, xhr: JQueryXHR) => {
           metric.measure({
             name: 'app.api.request-success',
             start: `api-request-start-${id}`,
@@ -229,11 +276,10 @@ export class Client {
             },
           });
           if (!isUndefined(options.success)) {
-            this.wrapCallback(id, options.success)(...args);
+            this.wrapCallback(id, options.success)(data, textStatus, xhr);
           }
         },
-        error: (...args) => {
-          const [resp] = args || [];
+        error: (resp: JQueryXHR, textStatus: string, errorThrown: string) => {
           metric.measure({
             name: 'app.api.request-error',
             start: `api-request-start-${id}`,
@@ -249,15 +295,15 @@ export class Client {
             const errorObjectToUse = createRequestError(
               resp,
               preservedError.stack,
-              options.method,
+              method,
               path
             );
 
             errorObjectToUse.removeFrames(2);
 
             // Setting this to warning because we are going to capture all failed requests
-            scope.setLevel('warning');
-            scope.setTag('http.statusCode', resp.status);
+            scope.setLevel(Sentry.Severity.Warning);
+            scope.setTag('http.statusCode', String(resp.status));
             Sentry.captureException(errorObjectToUse);
           });
 
@@ -267,12 +313,14 @@ export class Client {
               path,
               requestOptions: options,
             },
-            ...args
+            resp,
+            textStatus,
+            errorThrown
           );
         },
-        complete: (...args) => {
+        complete: (jqXHR: JQueryXHR, textStatus: string) => {
           hub.finishSpan(requestSpan);
-          return this.wrapCallback(id, options.complete, true)(...args);
+          return this.wrapCallback(id, options.complete, true)(jqXHR, textStatus);
         },
       })
     );
@@ -280,7 +328,13 @@ export class Client {
     return this.activeRequests[id];
   }
 
-  requestPromise(path, {includeAllArgs, ...options} = {}) {
+  requestPromise(
+    path: string,
+    {
+      includeAllArgs,
+      ...options
+    }: {includeAllArgs?: boolean} & Readonly<RequestOptions> = {}
+  ) {
     // Create an error object here before we make any async calls so
     // that we have a helpful stacktrace if it errors
     //
@@ -296,7 +350,7 @@ export class Client {
         success: (data, ...args) => {
           includeAllArgs ? resolve([data, ...args]) : resolve(data);
         },
-        error: (resp, ...args) => {
+        error: (resp: JQueryXHR) => {
           const errorObjectToUse = createRequestError(
             resp,
             preservedError.stack,
@@ -313,16 +367,20 @@ export class Client {
     });
   }
 
-  _chain(...funcs) {
-    funcs = funcs.filter(f => !isUndefined(f) && f);
+  _chain(...funcs: Array<((...args: any[]) => any) | undefined>) {
+    const filteredFuncs = funcs.filter(
+      (f): f is (...args: any[]) => any => {
+        return isFunction(f);
+      }
+    );
     return (...args) => {
-      funcs.forEach(func => {
+      filteredFuncs.forEach(func => {
         func.apply(funcs, args);
       });
     };
   }
 
-  _wrapRequest(path, options, extraParams) {
+  _wrapRequest(path: string, options: RequestOptions, extraParams: RequestCallbacks) {
     if (isUndefined(extraParams)) {
       extraParams = {};
     }
@@ -334,7 +392,10 @@ export class Client {
     return this.request(path, options);
   }
 
-  bulkDelete(params, options) {
+  bulkDelete(
+    params: ParamsType & {orgId: string; projectId?: string},
+    options: RequestCallbacks
+  ) {
     const path = params.projectId
       ? `/projects/${params.orgId}/${params.projectId}/issues/`
       : `/organizations/${params.orgId}/issues/`;
@@ -360,7 +421,15 @@ export class Client {
     );
   }
 
-  bulkUpdate(params, options) {
+  bulkUpdate(
+    params: ParamsType & {
+      orgId: string;
+      projectId?: string;
+      failSilently?: boolean;
+      data?: any;
+    },
+    options: RequestCallbacks
+  ) {
     const path = params.projectId
       ? `/projects/${params.orgId}/${params.projectId}/issues/`
       : `/organizations/${params.orgId}/issues/`;
@@ -387,7 +456,13 @@ export class Client {
     );
   }
 
-  merge(params, options) {
+  merge(
+    params: ParamsType & {
+      orgId: string;
+      projectId?: string;
+    },
+    options: RequestCallbacks
+  ) {
     const path = params.projectId
       ? `/projects/${params.orgId}/${params.projectId}/issues/`
       : `/organizations/${params.orgId}/issues/`;
