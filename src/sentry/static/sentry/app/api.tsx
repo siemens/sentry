@@ -90,7 +90,7 @@ type APIRequestMethod = 'POST' | 'GET' | 'DELETE' | 'PUT';
 type FunctionCallback = (...args: any[]) => void;
 
 type RequestCallbacks = {
-  success?: FunctionCallback;
+  success?: (data: any, textStatus?: string, xhr?: JQueryXHR) => void;
   complete?: FunctionCallback;
   error?: FunctionCallback;
 };
@@ -186,18 +186,18 @@ export class Client {
         sudo: code === SUDO_REQUIRED,
         retryRequest: () => {
           return this.requestPromise(path, requestOptions)
-            .then((...args) => {
+            .then((data: any) => {
               if (typeof requestOptions.success !== 'function') {
                 return;
               }
 
-              requestOptions.success(...args);
+              requestOptions.success(data);
             })
-            .catch((...args) => {
+            .catch(err => {
               if (typeof requestOptions.error !== 'function') {
                 return;
               }
-              requestOptions.error(...args);
+              requestOptions.error(err);
             });
         },
         onClose: () => {
