@@ -167,7 +167,16 @@ export class Client {
     }
   }
 
-  handleRequestError({id, path, requestOptions}, response, ...responseArgs) {
+  handleRequestError(
+    {
+      id,
+      path,
+      requestOptions,
+    }: {id: string; path: string; requestOptions: Readonly<RequestOptions>},
+    response: JQueryXHR,
+    textStatus: string,
+    errorThrown: string
+  ) {
     const code = get(response, 'responseJSON.detail.code');
     const isSudoRequired = code === SUDO_REQUIRED || code === SUPERUSER_REQUIRED;
 
@@ -207,7 +216,7 @@ export class Client {
     if (typeof errorCb !== 'function') {
       return;
     }
-    errorCb(response, ...responseArgs);
+    errorCb(response, textStatus, errorThrown);
   }
 
   request(path: string, options: Readonly<RequestOptions> = {}) {
